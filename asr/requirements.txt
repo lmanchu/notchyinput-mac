@@ -1,0 +1,4 @@
+mlx>=0.20
+mlx_qwen3_asr>=0.2
+numpy
+zhconv==1.4.3

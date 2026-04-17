@@ -90,7 +90,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupRecorder() {
         recorder.levelCallback = { level in
-            RecordingState.level = level
+            RecordingState.pushLevel(level)
         }
         recorder.startEngine()
     }
@@ -120,6 +120,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         TextInjector.saveTargetApp()
         isRecording = true
         isToggleMode = toggle
+        RecordingState.recordingStart = Date()
+        RecordingState.waveform = Array(repeating: 0, count: 30)
         RecordingState.current = .recording
         recorder.start()
         playSound("Tink") // subtle start sound
@@ -150,7 +152,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             DispatchQueue.main.async {
                 if !text.isEmpty {
-                    RecordingState.current = .done
+                    RecordingState.current = .done(text: text)
                     self.playSound("Pop") // done sound
                     TextInjector.inject(text)
                     self.log("Injected: \(text)")

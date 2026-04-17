@@ -25,3 +25,6 @@ notchyinput-*.log
 
 # Model cache
 models/
+
+# gstack
+.gstack/

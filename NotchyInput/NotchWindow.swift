@@ -7,7 +7,7 @@ enum RecordingDisplayState: Equatable {
     case loading(message: String, progress: Float)
     case recording
     case processing
-    case done
+    case done(text: String)
 }
 
 /// Notification posted when recording state changes
@@ -26,6 +26,16 @@ final class RecordingState {
     }
     /// Audio level 0.0–1.0 during recording
     static var level: Float = 0
+    /// Waveform history (last N samples for visualization)
+    static var waveform: [Float] = Array(repeating: 0, count: 30)
+    /// Recording start time
+    static var recordingStart: Date?
+
+    static func pushLevel(_ l: Float) {
+        level = l
+        waveform.append(l)
+        if waveform.count > 30 { waveform.removeFirst() }
+    }
 }
 
 /// An invisible window that sits behind the notch area.

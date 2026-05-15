@@ -24,8 +24,10 @@ All notable changes to NotchyInput will be documented here.
 - Health-ping watchdog (RSS threshold + 5s response timeout, restart on miss).
 - Subprocess zombie defense (terminationHandler nilled before terminate to avoid late-signal respawn).
 
+### Distribution
+- **Notarized + stapled** by Apple notary service (submission `1d6e8091-…`, status Accepted ~90s after upload). `spctl -a -v` reports `accepted, source=Notarized Developer ID`. First-launch Gatekeeper warning is gone — DMG opens with a double-click on any Mac.
+
 ### Known limitations
-- DMG is signed but **not notarized** — first launch on a fresh machine triggers Gatekeeper warning. Right-click → Open once to bypass. Notarization requires app-specific password setup; see `pack_release.sh` instructions.
 - Apple Silicon only (mlx requirement). macOS 13.0+.
 - `ASRState` actor exists but isn't wired into `ASRBridge` yet.
 

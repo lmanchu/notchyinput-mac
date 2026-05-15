@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Combine
 
 /// Recording state for the notch display
 enum RecordingDisplayState: Equatable {
@@ -15,26 +16,47 @@ extension Notification.Name {
     static let recordingStateChanged = Notification.Name("recordingStateChanged")
 }
 
-/// Global recording state, updated by AppDelegate
-final class RecordingState {
-    static var current: RecordingDisplayState = .idle {
-        didSet {
-            if current != oldValue {
-                NotificationCenter.default.post(name: .recordingStateChanged, object: nil)
+/// File-based animation diagnostic log (~/notchyinput-anim.log). Disabled in release.
+fileprivate func animLog(_ msg: String) {
+    #if DEBUG
+    let line = "\(Date()) [anim] \(msg)\n"
+    let path = NSHomeDirectory() + "/notchyinput-anim.log"
+    if let data = line.data(using: .utf8) {
+        if FileManager.default.fileExists(atPath: path) {
+            if let fh = FileHandle(forWritingAtPath: path) {
+                fh.seekToEndOfFile(); fh.write(data); fh.closeFile()
             }
+        } else {
+            FileManager.default.createFile(atPath: path, contents: data)
         }
     }
-    /// Audio level 0.0–1.0 during recording
-    static var level: Float = 0
-    /// Waveform history (last N samples for visualization)
-    static var waveform: [Float] = Array(repeating: 0, count: 30)
-    /// Recording start time
-    static var recordingStart: Date?
+    #endif
+}
+
+/// Legacy compatibility shim — proxies to RecordingViewModel.shared so AppDelegate keeps working.
+/// All real state lives in RecordingViewModel now; SwiftUI observes that.
+final class RecordingState {
+    static var current: RecordingDisplayState {
+        get { RecordingViewModel.shared.state }
+        set {
+            DispatchQueue.main.async {RecordingViewModel.shared.setState(newValue) }
+        }
+    }
+    static var level: Float {
+        get { RecordingViewModel.shared.level }
+        set { DispatchQueue.main.async {RecordingViewModel.shared.level = newValue } }
+    }
+    static var waveform: [Float] {
+        get { RecordingViewModel.shared.waveform }
+        set { DispatchQueue.main.async {RecordingViewModel.shared.waveform = newValue } }
+    }
+    static var recordingStart: Date? {
+        get { RecordingViewModel.shared.recordingStart }
+        set { DispatchQueue.main.async {RecordingViewModel.shared.recordingStart = newValue } }
+    }
 
     static func pushLevel(_ l: Float) {
-        level = l
-        waveform.append(l)
-        if waveform.count > 30 { waveform.removeFirst() }
+        DispatchQueue.main.async {RecordingViewModel.shared.pushLevel(l) }
     }
 }
 
@@ -54,6 +76,8 @@ class NotchWindow: NSPanel {
     private var isHovered = false
     private let pillView = NotchPillView()
     private var pillContentHost: NSHostingView<NotchPillContent>?
+    private let viewModel = RecordingViewModel.shared
+    private var stateCancellable: Any?
 
     init(onClick: @escaping () -> Void) {
         self.onClick = onClick
@@ -85,7 +109,7 @@ class NotchWindow: NSPanel {
             cv.wantsLayer = true
             cv.layer?.masksToBounds = false
 
-            let hostView = NSHostingView(rootView: NotchPillContent())
+            let hostView = NSHostingView(rootView: NotchPillContent(vm: viewModel))
             hostView.frame = cv.bounds
             hostView.autoresizingMask = [.width, .height]
             hostView.alphaValue = 1
@@ -117,15 +141,20 @@ class NotchWindow: NSPanel {
     // MARK: - Expand / Collapse
 
     private func observeStatusChanges() {
-        statusObserver = NotificationCenter.default.addObserver(
-            forName: .recordingStateChanged, object: nil, queue: .main
-        ) { [weak self] _ in
-            self?.updateExpansionState()
-        }
+        animLog("observeStatusChanges: subscribing to viewModel.$state")
+        stateCancellable = viewModel.$state
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] newState in
+                animLog("vm.state changed to \(newState); self=\(self == nil ? "nil" : "alive")")
+                self?.updateExpansionState()
+            }
+        animLog("observeStatusChanges: subscription=\(stateCancellable == nil ? "nil" : "ok")")
     }
 
     private func updateExpansionState() {
-        let shouldExpand = RecordingState.current != .idle
+        let shouldExpand = viewModel.state != .idle
+        animLog("updateExpansionState: shouldExpand=\(shouldExpand) isExpanded=\(isExpanded) current=\(viewModel.state)")
 
         if shouldExpand && !isExpanded {
             collapseDebounceTimer?.invalidate()
@@ -136,7 +165,7 @@ class NotchWindow: NSPanel {
             collapseDebounceTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
                 guard let self else { return }
                 self.collapseDebounceTimer = nil
-                if RecordingState.current == .idle && self.isExpanded {
+                if self.viewModel.state == .idle && self.isExpanded {
                     self.collapse()
                 }
             }
@@ -144,13 +173,13 @@ class NotchWindow: NSPanel {
             collapseDebounceTimer?.invalidate()
             collapseDebounceTimer = nil
         }
-
-        pillContentHost?.rootView = NotchPillContent(isHovering: isHovered)
+        // NOTE: no more pillContentHost.rootView reassignment — SwiftUI diffs via @ObservedObject
     }
 
     private func expandWithBounce() {
+        animLog("expandWithBounce called")
         isExpanded = true
-        guard let screen = NSScreen.builtIn else { return }
+        guard let screen = NSScreen.builtIn else { animLog("expandWithBounce: no builtin screen, bail"); return }
         let screenFrame = screen.frame
 
         let targetWidth: CGFloat = notchWidth + 80
@@ -293,11 +322,11 @@ class NotchWindow: NSPanel {
         if notchRect.contains(mouseLocation) {
             if !isHovered {
                 isHovered = true
-                pillContentHost?.rootView = NotchPillContent(isHovering: true)
+                DispatchQueue.main.async { [weak self] in self?.viewModel.isHovering = true }
             }
         } else if isHovered {
             isHovered = false
-            pillContentHost?.rootView = NotchPillContent(isHovering: false)
+            DispatchQueue.main.async { [weak self] in self?.viewModel.isHovering = false }
         }
     }
 
@@ -385,14 +414,22 @@ class CVDisplayLinkWrapper {
         self.callback = callback
     }
 
+    private static var fireCount: Int = 0
+
     func start() {
-        CVDisplayLinkCreateWithActiveCGDisplays(&displayLink)
-        guard let displayLink else { return }
+        animLog("CVDisplayLinkWrapper.start()")
+        let createResult = CVDisplayLinkCreateWithActiveCGDisplays(&displayLink)
+        animLog("CVDisplayLinkCreateWithActiveCGDisplays = \(createResult), link=\(displayLink == nil ? "nil" : "ok")")
+        guard let displayLink else { animLog("displayLink is nil — bailing"); return }
 
         let opaqueWrapper = Unmanaged.passRetained(self)
         CVDisplayLinkSetOutputCallback(displayLink, { (_, _, _, _, _, userInfo) -> CVReturn in
             guard let userInfo else { return kCVReturnError }
             let wrapper = Unmanaged<CVDisplayLinkWrapper>.fromOpaque(userInfo).takeUnretainedValue()
+            CVDisplayLinkWrapper.fireCount += 1
+            if CVDisplayLinkWrapper.fireCount <= 3 || CVDisplayLinkWrapper.fireCount % 30 == 0 {
+                animLog("CVDisplayLink fire #\(CVDisplayLinkWrapper.fireCount) stopped=\(wrapper.stopped)")
+            }
             guard !wrapper.stopped else { return kCVReturnSuccess }
             let keepRunning = wrapper.callback()
             if !keepRunning {

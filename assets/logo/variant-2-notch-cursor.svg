@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Variant 2: Notch + text caret -->
+  <!-- Concept: emphasize the "input" half — Dynamic Island holds a blinking text caret -->
+  <!-- Style: deep indigo bg, white pill (inverted from variant 1) -->
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1e1b4b"/>
+      <stop offset="1" stop-color="#0f0a2e"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="230" ry="230" fill="url(#bg2)"/>
+  <!-- Dynamic Island pill, white -->
+  <rect x="262" y="380" width="500" height="170" rx="85" ry="85" fill="#ffffff"/>
+  <!-- Text caret + dots suggesting voice→text -->
+  <g>
+    <!-- Three dots (voice signal in) -->
+    <circle cx="362" cy="465" r="9" fill="#1e1b4b" opacity="0.4"/>
+    <circle cx="402" cy="465" r="11" fill="#1e1b4b" opacity="0.7"/>
+    <circle cx="445" cy="465" r="13" fill="#1e1b4b"/>
+    <!-- Arrow / flow indicator -->
+    <path d="M 480 465 L 540 465" stroke="#1e1b4b" stroke-width="6" stroke-linecap="round"/>
+    <path d="M 525 450 L 545 465 L 525 480" stroke="#1e1b4b" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    <!-- Text caret (blinking cursor) -->
+    <rect x="595" y="415" width="8" height="100" fill="#1e1b4b" rx="2"/>
+    <rect x="615" y="430" width="50" height="6" rx="3" fill="#1e1b4b" opacity="0.5"/>
+    <rect x="615" y="465" width="38" height="6" rx="3" fill="#1e1b4b" opacity="0.5"/>
+    <rect x="615" y="500" width="50" height="6" rx="3" fill="#1e1b4b" opacity="0.5"/>
+  </g>
+  <!-- Wordmark -->
+  <text x="512" y="720" font-family="-apple-system, SF Pro Display, system-ui, sans-serif" font-weight="600" font-size="96" text-anchor="middle" fill="#ffffff" letter-spacing="-2">NotchyInput</text>
+  <text x="512" y="790" font-family="-apple-system, SF Pro Text, system-ui, sans-serif" font-weight="400" font-size="36" text-anchor="middle" fill="#a5b4fc" letter-spacing="4">SPEAK · TYPE</text>
+</svg>

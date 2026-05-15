@@ -1,26 +1,27 @@
 import SwiftUI
 
 /// SwiftUI content rendered inside the notch pill — rich animations for each state.
+/// Observes RecordingViewModel so SwiftUI can diff in-place (no more NSHostingView root reassign).
 struct NotchPillContent: View {
-    var isHovering: Bool = false
+    @ObservedObject var vm: RecordingViewModel
 
     var body: some View {
         ZStack {
             // Glow overlay (behind content, visible during recording)
-            if case .recording = RecordingState.current {
+            if case .recording = vm.state {
                 RecordingGlowView()
             }
 
             // Main content
-            switch RecordingState.current {
+            switch vm.state {
             case .idle:
-                IdleView(isHovering: isHovering)
+                IdleView(isHovering: vm.isHovering)
 
             case .loading(let message, let progress):
                 LoadingView(message: message, progress: progress)
 
             case .recording:
-                RecordingView()
+                RecordingView(vm: vm)
 
             case .processing:
                 ProcessingView()
@@ -29,7 +30,7 @@ struct NotchPillContent: View {
                 DoneView(text: text)
             }
         }
-        .animation(.easeInOut(duration: 0.3), value: RecordingState.current)
+        .animation(.spring(response: 0.4, dampingFraction: 0.7), value: vm.state)
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.clear)
@@ -104,6 +105,7 @@ struct LoadingView: View {
 // MARK: - Recording: waveform + timer + ripples
 
 struct RecordingView: View {
+    @ObservedObject var vm: RecordingViewModel
     @State private var elapsed: TimeInterval = 0
     @State private var timer: Timer?
 
@@ -115,13 +117,13 @@ struct RecordingView: View {
                 Image(systemName: "mic.fill")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundColor(.red)
-                    .scaleEffect(1.0 + CGFloat(RecordingState.level) * 0.25)
-                    .animation(.easeOut(duration: 0.08), value: RecordingState.level)
+                    .scaleEffect(1.0 + CGFloat(vm.level) * 0.25)
+                    .animation(.easeOut(duration: 0.08), value: vm.level)
             }
             .frame(width: 24, height: 24)
 
             // Waveform
-            WaveformView()
+            WaveformView(samples: vm.waveform)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             // Timer
@@ -133,7 +135,7 @@ struct RecordingView: View {
         .onAppear {
             elapsed = 0
             timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
-                if let start = RecordingState.recordingStart {
+                if let start = vm.recordingStart {
                     elapsed = Date().timeIntervalSince(start)
                 }
             }
@@ -154,9 +156,10 @@ struct RecordingView: View {
 // MARK: - Waveform visualization
 
 struct WaveformView: View {
+    let samples: [Float]
+
     var body: some View {
         GeometryReader { geo in
-            let samples = RecordingState.waveform
             let barWidth: CGFloat = 2
             let gap: CGFloat = 1.5
             let maxBars = Int(geo.size.width / (barWidth + gap))
@@ -286,18 +289,15 @@ struct DoneView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            // Animated checkmark (drawn like handwriting)
             AnimatedCheckmark(progress: checkmarkProgress)
                 .frame(width: 16, height: 16)
 
-            // Green flash pulse
             if flashOpacity > 0 {
                 Color.green.opacity(flashOpacity)
                     .frame(width: 2, height: 14)
                     .cornerRadius(1)
             }
 
-            // Text preview (first ~15 chars)
             if showText {
                 Text(String(text.prefix(20)))
                     .font(.system(size: 9, weight: .medium))
@@ -308,15 +308,12 @@ struct DoneView: View {
         }
         .transition(.scale.combined(with: .opacity))
         .onAppear {
-            // Animate checkmark draw
             withAnimation(.easeOut(duration: 0.4)) {
                 checkmarkProgress = 1.0
             }
-            // Flash green
             withAnimation(.easeOut(duration: 0.6)) {
                 flashOpacity = 0
             }
-            // Show text preview after checkmark
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 withAnimation(.easeOut(duration: 0.3)) {
                     showText = true
@@ -341,20 +338,5 @@ struct AnimatedCheckmark: View {
             .trim(from: 0, to: progress)
             .stroke(Color.green, style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
         }
-    }
-}
-
-// MARK: - Spinner (kept as fallback)
-
-struct SpinnerView: View {
-    @State private var isAnimating = false
-
-    var body: some View {
-        Circle()
-            .trim(from: 0.05, to: 0.8)
-            .stroke(Color.white, style: StrokeStyle(lineWidth: 2, lineCap: .round))
-            .rotationEffect(.degrees(isAnimating ? 360 : 0))
-            .animation(.linear(duration: 0.8).repeatForever(autoreverses: false), value: isAnimating)
-            .onAppear { isAnimating = true }
     }
 }

@@ -10,9 +10,87 @@ final class ASRBridge {
     private var stdoutPipe: Pipe?
     private var isReady = false
     private let readyCallback: () -> Void
+    private let restartQueue = DispatchQueue(label: "asr.restart")
+    private var isRestarting = false
+    private var healthTimer: Timer?
+
+    /// Minimum RSS (MB) for a healthy model — Qwen3-ASR-0.6B needs ~1.2 GB.
+    private let minHealthyRSSMB: Double = 500
 
     init(onReady: @escaping () -> Void) {
         self.readyCallback = onReady
+    }
+
+    /// Subprocess alive AND model loaded.
+    private var isHealthy: Bool {
+        return isReady && (process?.isRunning ?? false)
+    }
+
+    // MARK: – Periodic health check
+
+    private func startHealthTimer() {
+        DispatchQueue.main.async { [weak self] in
+            self?.healthTimer?.invalidate()
+            self?.healthTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+                self?.performHealthCheck()
+            }
+        }
+    }
+
+    private func stopHealthTimer() {
+        DispatchQueue.main.async { [weak self] in
+            self?.healthTimer?.invalidate()
+            self?.healthTimer = nil
+        }
+    }
+
+    /// Sends {"ping":true} and expects {"pong":true,"rss_mb":...} within 5 s.
+    /// Restarts if no response or RSS is below threshold.
+    private func performHealthCheck() {
+        guard isHealthy, let stdin = stdinPipe, let stdout = stdoutPipe else { return }
+
+        guard let pingData = "{\"ping\":true}\n".data(using: .utf8) else { return }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var rssMB: Double = 0
+
+        let prev = stdout.fileHandleForReading.readabilityHandler
+        stdout.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty,
+                  let line = String(data: data, encoding: .utf8),
+                  let jsonData = line.trimmingCharacters(in: .whitespacesAndNewlines).data(using: .utf8),
+                  let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any]
+            else { return }
+            if dict["pong"] as? Bool == true {
+                rssMB = dict["rss_mb"] as? Double ?? 0
+                semaphore.signal()
+            }
+        }
+
+        do {
+            try stdin.fileHandleForWriting.write(contentsOf: pingData)
+        } catch {
+            NSLog("[asr] health-ping write failed: %@", String(describing: error))
+            stdout.fileHandleForReading.readabilityHandler = prev
+            scheduleRestart(reason: "health-ping write failure")
+            return
+        }
+
+        let timedOut = semaphore.wait(timeout: .now() + 5) == .timedOut
+        stdout.fileHandleForReading.readabilityHandler = prev
+
+        if timedOut {
+            NSLog("[asr] health-ping timeout — model unresponsive, restarting")
+            process?.terminate()
+            return
+        }
+        if rssMB < minHealthyRSSMB {
+            NSLog("[asr] health-ping RSS %.0f MB < %.0f MB threshold — model dropped, restarting", rssMB, minHealthyRSSMB)
+            process?.terminate()
+            return
+        }
+        NSLog("[asr] health-ping OK — RSS %.0f MB", rssMB)
     }
 
     func start() {
@@ -108,6 +186,7 @@ final class ASRBridge {
                     if status == "ready" {
                         self?.isReady = true
                         NSLog("[asr] Python ASR server ready")
+                        self?.startHealthTimer()
                         DispatchQueue.main.async {
                             RecordingState.current = .idle
                             self?.readyCallback()
@@ -124,6 +203,16 @@ final class ASRBridge {
             }
         }
 
+        // Detect subprocess death and auto-respawn so a silent crash
+        // doesn't leave Swift writing into a dead pipe (the 21-hour zombie bug).
+        proc.terminationHandler = { [weak self] p in
+            NSLog("[asr] Python subprocess died: pid=%d status=%d reason=%d",
+                  p.processIdentifier, p.terminationStatus, p.terminationReason.rawValue)
+            guard let self = self else { return }
+            self.isReady = false
+            self.scheduleRestart(reason: "subprocess exit")
+        }
+
         do {
             try proc.run()
             print("[asr] Started Python ASR server (pid: \(proc.processIdentifier))")
@@ -132,8 +221,44 @@ final class ASRBridge {
         }
     }
 
+    /// Debounced restart — safe to call from terminationHandler or transcribe timeout.
+    private func scheduleRestart(reason: String) {
+        restartQueue.async { [weak self] in
+            guard let self = self else { return }
+            if self.isRestarting { return }
+            self.isRestarting = true
+            NSLog("[asr] Scheduling restart (reason: %@)", reason)
+            self.stopHealthTimer()
+            self.isReady = false
+            self.process = nil
+            self.stdinPipe = nil
+            self.stdoutPipe = nil
+            DispatchQueue.main.async {
+                self.start()
+                self.restartQueue.async { self.isRestarting = false }
+            }
+        }
+    }
+
     func stop() {
-        process?.terminate()
+        stopHealthTimer()
+        // Clear terminationHandler first — otherwise when the subprocess actually
+        // exits (possibly minutes later, e.g. after macOS sleep delivers the queued
+        // signal), the handler fires scheduleRestart() and spawns an extra sidecar
+        // we no longer track. That's how 7 zombie sidecars accumulated over a week.
+        if let proc = process {
+            proc.terminationHandler = nil
+            proc.terminate()
+            // Best-effort wait, then SIGKILL escalation so subprocess can't linger
+            // suspended through sleep and respawn-race on wake.
+            let deadline = Date().addingTimeInterval(2)
+            while proc.isRunning && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            if proc.isRunning {
+                kill(proc.processIdentifier, SIGKILL)
+            }
+        }
         process = nil
         stdinPipe = nil
         stdoutPipe = nil
@@ -142,8 +267,11 @@ final class ASRBridge {
 
     /// Transcribe WAV audio data. Blocks until result returns.
     func transcribe(wavData: Data, language: String = "zh") -> String {
-        guard isReady, let stdin = stdinPipe, let stdout = stdoutPipe else {
-            print("[asr] Not ready")
+        guard isHealthy, let stdin = stdinPipe, let stdout = stdoutPipe else {
+            NSLog("[asr] Not healthy (isReady=%@ running=%@) — scheduling restart",
+                  isReady ? "true" : "false",
+                  (process?.isRunning ?? false) ? "true" : "false")
+            scheduleRestart(reason: "transcribe on unhealthy bridge")
             return ""
         }
 
@@ -155,9 +283,12 @@ final class ASRBridge {
 
         jsonString += "\n"
 
-        // Temporarily replace readability handler to capture response synchronously
+        // Temporarily replace readability handler to capture response synchronously.
+        // Handles both success {"text":...} and failure {"error":...} — either signals
+        // the semaphore so we never wait the full 30s on a known error.
         let semaphore = DispatchSemaphore(value: 0)
         var result = ""
+        var errorResponse: String?
 
         stdout.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
@@ -173,13 +304,45 @@ final class ASRBridge {
                         print("[asr] Transcribed in \(String(format: "%.2f", elapsed))s: \(text)")
                     }
                     semaphore.signal()
+                } else if let err = dict["error"] as? String {
+                    errorResponse = err
+                    NSLog("[asr] Transcription error from server: %@", err)
+                    semaphore.signal()
                 }
             }
         }
 
-        stdin.fileHandleForWriting.write(jsonString.data(using: .utf8)!)
+        // Writing to a closed pipe raises SIGPIPE by default on macOS.
+        // Guard with a running check and wrap write to avoid app crash.
+        guard process?.isRunning == true else {
+            scheduleRestart(reason: "process died before write")
+            return ""
+        }
+        do {
+            try stdin.fileHandleForWriting.write(contentsOf: jsonString.data(using: .utf8)!)
+        } catch {
+            NSLog("[asr] Write to stdin failed: %@", String(describing: error))
+            scheduleRestart(reason: "stdin write failure")
+            return ""
+        }
 
-        _ = semaphore.wait(timeout: .now() + 30) // 30s timeout
+        let timeoutResult = semaphore.wait(timeout: .now() + 30)
+        if timeoutResult == .timedOut {
+            NSLog("[asr] Transcribe timed out after 30s — checking subprocess health")
+            if !(process?.isRunning ?? false) {
+                scheduleRestart(reason: "timeout with dead subprocess")
+            } else {
+                // Process alive but model stuck — still respawn to recover.
+                NSLog("[asr] Subprocess alive but unresponsive; forcing restart")
+                process?.terminate()
+                // terminationHandler will call scheduleRestart()
+            }
+            return ""
+        }
+        if let err = errorResponse {
+            NSLog("[asr] Returning empty result due to error: %@", err)
+            return ""
+        }
         return result
     }
 }

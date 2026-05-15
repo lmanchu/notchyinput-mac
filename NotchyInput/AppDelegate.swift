@@ -35,7 +35,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupHotkey()
         setupRecorder()
         startASR()
+        observeSleepWake()
         NSLog("[app] All setup complete")
+    }
+
+    // Sleep/wake breaks the stdin/stdout pipe to the Python sidecar without
+    // killing the subprocess, so terminationHandler never fires. Respawn the
+    // bridge on wake to recover.
+    private func observeSleepWake() {
+        let nc = NSWorkspace.shared.notificationCenter
+        nc.addObserver(self, selector: #selector(systemWillSleep),
+                       name: NSWorkspace.willSleepNotification, object: nil)
+        nc.addObserver(self, selector: #selector(systemDidWake),
+                       name: NSWorkspace.didWakeNotification, object: nil)
+    }
+
+    @objc private func systemWillSleep() {
+        NSLog("[app] systemWillSleep — stopping ASR bridge")
+        log("systemWillSleep")
+        asrReady = false
+        asrBridge?.stop()
+    }
+
+    @objc private func systemDidWake() {
+        NSLog("[app] systemDidWake — restarting ASR bridge")
+        log("systemDidWake")
+        asrReady = false
+        asrBridge?.stop()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.asrBridge?.start()
+        }
     }
 
     private func requestAccessibilityIfNeeded() {

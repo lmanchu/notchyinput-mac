@@ -115,7 +115,15 @@ def transcribe(audio_bytes: bytes, model, language: str = "zh") -> str:
 def main():
     send({"status": "loading", "message": "Starting ASR engine...", "progress": 0.0})
 
-    model, config = load_model()
+    try:
+        model, config = load_model()
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        sys.stderr.write(f"[asr_server] FATAL during load_model: {e}\n{tb}\n")
+        sys.stderr.flush()
+        send({"status": "fatal", "error": f"load_model failed: {e}"})
+        sys.exit(2)
 
     # Signal ready
     send({"status": "ready"})
@@ -130,6 +138,13 @@ def main():
             request = json.loads(line)
         except json.JSONDecodeError as e:
             send({"error": f"Invalid JSON: {e}"})
+            continue
+
+        # Health probe — lets Swift confirm model is still responsive.
+        if request.get("ping"):
+            import resource
+            rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1_000_000
+            send({"pong": True, "rss_mb": round(rss_mb, 1)})
             continue
 
         audio_b64 = request.get("audio", "")
@@ -152,4 +167,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        sys.stderr.write(f"[asr_server] FATAL unhandled: {e}\n{traceback.format_exc()}\n")
+        sys.stderr.flush()
+        sys.exit(3)

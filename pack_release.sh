@@ -11,6 +11,14 @@ APP_NAME="NotchyInput"
 DMG_NAME="NotchyInput-Mac"
 VERSION="1.0.0"
 
+# Code signing identity (Developer ID Application: Yichen chu — Team HG5RRBKA8T)
+SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: Yichen chu (HG5RRBKA8T)}"
+ENTITLEMENTS="$PROJECT_DIR/NotchyInput/NotchyInput.entitlements"
+# Notarize requires app-specific password stored as keychain profile.
+# To enable: `xcrun notarytool store-credentials notchyinput-notary --apple-id lman@me.com --team-id HG5RRBKA8T`
+# Then set NOTARIZE_PROFILE=notchyinput-notary in env. Skipped when unset.
+NOTARIZE_PROFILE="${NOTARIZE_PROFILE:-}"
+
 echo "=== NotchyInput Release Packer v${VERSION} ==="
 echo ""
 
@@ -134,8 +142,53 @@ rm -rf "$SITE_PKG/pip" "$SITE_PKG/setuptools" "$SITE_PKG/pkg_resources" 2>/dev/n
 FINAL_SIZE=$(du -sh "$APP" | awk '{print $1}')
 echo "  Final app size: $FINAL_SIZE"
 
-# --- Step 6: Create DMG ---
-echo "[6/6] Creating DMG..."
+# --- Step 6: Code sign (Developer ID, hardened runtime) ---
+echo "[6/7] Code signing with $SIGN_IDENTITY ..."
+
+# Clear all extended attributes (xattr) before signing — provenance/quarantine xattrs break signing.
+xattr -cr "$APP" 2>/dev/null || true
+
+# Sign bottom-up: every dylib, .so, embedded binary first; bundle last.
+# Apple deprecated --deep; explicit nested signing is the supported path.
+echo "  Signing nested binaries..."
+find "$APP/Contents" \( -name "*.dylib" -o -name "*.so" \) -print0 \
+    | xargs -0 -I {} codesign --force --timestamp --options runtime \
+        --sign "$SIGN_IDENTITY" {} 2>&1 | grep -v "replacing existing" || true
+
+# Sign embedded Python binary (if present)
+if [ -f "$APP/Contents/Resources/python/bin/python3" ]; then
+    codesign --force --timestamp --options runtime \
+        --entitlements "$ENTITLEMENTS" \
+        --sign "$SIGN_IDENTITY" \
+        "$APP/Contents/Resources/python/bin/python3"
+fi
+
+# Sign Python.framework if present (bottom-up)
+PY_FW="$APP/Contents/Frameworks/Python.framework"
+if [ -d "$PY_FW" ]; then
+    find "$PY_FW" -type f \( -name "Python" -o -name "*.dylib" \) -print0 \
+        | xargs -0 -I {} codesign --force --timestamp --options runtime \
+            --sign "$SIGN_IDENTITY" {} || true
+    codesign --force --timestamp --options runtime \
+        --sign "$SIGN_IDENTITY" "$PY_FW/Versions/Current" 2>/dev/null || true
+    codesign --force --timestamp --options runtime \
+        --sign "$SIGN_IDENTITY" "$PY_FW"
+fi
+
+# Sign the main app bundle last with entitlements
+echo "  Signing app bundle..."
+codesign --force --timestamp --options runtime \
+    --entitlements "$ENTITLEMENTS" \
+    --sign "$SIGN_IDENTITY" \
+    "$APP"
+
+# Verify
+echo "  Verifying signature..."
+codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tail -3
+codesign -dvv "$APP" 2>&1 | grep -E "Authority|TeamIdentifier"
+
+# --- Step 7: Create DMG ---
+echo "[7/7] Creating DMG..."
 
 DMG_STAGING="$BUILD_DIR/dmg_staging"
 mkdir -p "$DMG_STAGING"
@@ -151,6 +204,27 @@ hdiutil create -volname "$APP_NAME" \
     -srcfolder "$DMG_STAGING" \
     -ov -format UDZO \
     "$DMG_PATH" 2>&1 | tail -3
+
+# Sign the DMG itself
+codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG_PATH"
+
+# Notarize (optional — skip if NOTARIZE_PROFILE env var not set)
+if [ -n "$NOTARIZE_PROFILE" ]; then
+    echo ""
+    echo "Submitting for notarization (profile: $NOTARIZE_PROFILE)..."
+    xcrun notarytool submit "$DMG_PATH" \
+        --keychain-profile "$NOTARIZE_PROFILE" \
+        --wait
+    xcrun stapler staple "$DMG_PATH"
+    echo "Notarization complete + stapled."
+else
+    echo ""
+    echo "Skipping notarization (NOTARIZE_PROFILE not set)."
+    echo "First-launch users will see Gatekeeper warning. To enable:"
+    echo "  1. Generate app-specific password at appleid.apple.com → Sign-In and Security → App-Specific Passwords"
+    echo "  2. xcrun notarytool store-credentials notchyinput-notary --apple-id lman@me.com --team-id HG5RRBKA8T"
+    echo "  3. Re-run with: NOTARIZE_PROFILE=notchyinput-notary ./pack_release.sh"
+fi
 
 echo ""
 echo "=== Done ==="

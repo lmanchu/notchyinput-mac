@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Variant 2 — Icon only (no wordmark). For AppIcon, Dock, Finder. -->
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1e1b4b"/>
+      <stop offset="1" stop-color="#0f0a2e"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="230" ry="230" fill="url(#bg2)"/>
+  <!-- Pill scaled up + centered vertically for icon-only use -->
+  <rect x="172" y="382" width="680" height="260" rx="130" ry="130" fill="#ffffff"/>
+  <g transform="translate(0, 50)">
+    <!-- Three dots (voice signal in), scaled up -->
+    <circle cx="290" cy="412" r="14" fill="#1e1b4b" opacity="0.35"/>
+    <circle cx="348" cy="412" r="17" fill="#1e1b4b" opacity="0.65"/>
+    <circle cx="412" cy="412" r="21" fill="#1e1b4b"/>
+    <!-- Arrow -->
+    <path d="M 462 412 L 562 412" stroke="#1e1b4b" stroke-width="10" stroke-linecap="round"/>
+    <path d="M 538 388 L 572 412 L 538 436" stroke="#1e1b4b" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    <!-- Text caret + lines -->
+    <rect x="630" y="338" width="14" height="148" fill="#1e1b4b" rx="3"/>
+    <rect x="666" y="358" width="84" height="10" rx="5" fill="#1e1b4b" opacity="0.5"/>
+    <rect x="666" y="406" width="62" height="10" rx="5" fill="#1e1b4b" opacity="0.5"/>
+    <rect x="666" y="454" width="84" height="10" rx="5" fill="#1e1b4b" opacity="0.5"/>
+  </g>
+</svg>

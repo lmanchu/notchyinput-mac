@@ -11,6 +11,8 @@
 		A1000002 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000002; };
 		A1000003 /* NotchWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000003; };
 		A1000004 /* NotchPillContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000004; };
+		A100000B /* RecordingViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000B; };
+		A100000C /* ASRState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000C; };
 		A1000005 /* AudioRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000005; };
 		A1000006 /* ASRBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000006; };
 		A1000007 /* TextInjector.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000007; };
@@ -23,6 +25,8 @@
 		A2000002 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		A2000003 /* NotchWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotchWindow.swift; sourceTree = "<group>"; };
 		A2000004 /* NotchPillContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotchPillContent.swift; sourceTree = "<group>"; };
+		A200000B /* RecordingViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingViewModel.swift; sourceTree = "<group>"; };
+		A200000C /* ASRState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ASRState.swift; sourceTree = "<group>"; };
 		A2000005 /* AudioRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioRecorder.swift; sourceTree = "<group>"; };
 		A2000006 /* ASRBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ASRBridge.swift; sourceTree = "<group>"; };
 		A2000007 /* TextInjector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextInjector.swift; sourceTree = "<group>"; };
@@ -58,6 +62,8 @@
 				A2000002 /* AppDelegate.swift */,
 				A2000003 /* NotchWindow.swift */,
 				A2000004 /* NotchPillContent.swift */,
+				A200000B /* RecordingViewModel.swift */,
+				A200000C /* ASRState.swift */,
 				A2000005 /* AudioRecorder.swift */,
 				A2000006 /* ASRBridge.swift */,
 				A2000007 /* TextInjector.swift */,
@@ -144,6 +150,8 @@
 				A1000002 /* AppDelegate.swift in Sources */,
 				A1000003 /* NotchWindow.swift in Sources */,
 				A1000004 /* NotchPillContent.swift in Sources */,
+				A100000B /* RecordingViewModel.swift in Sources */,
+				A100000C /* ASRState.swift in Sources */,
 				A1000005 /* AudioRecorder.swift in Sources */,
 				A1000006 /* ASRBridge.swift in Sources */,
 				A1000007 /* TextInjector.swift in Sources */,
@@ -158,6 +166,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
@@ -185,6 +194,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;

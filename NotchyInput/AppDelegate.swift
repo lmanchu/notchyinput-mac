@@ -29,6 +29,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSLog("[app] applicationDidFinishLaunching")
+        TranscriptionPolish.Config.seedIfMissing()
         requestAccessibilityIfNeeded()
         setupStatusItem()
         setupNotchWindow()
@@ -172,19 +173,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Transcribe on background thread
+        // Transcribe on background thread; then polish via LLM if enabled.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             self.log("Sending to ASR...")
-            let text = self.asrBridge.transcribe(wavData: wavData)
-            self.log("ASR result: '\(text)'")
+            let raw = self.asrBridge.transcribe(wavData: wavData)
+            self.log("ASR result: '\(raw)'")
+
+            // Polish layer (no-op when disabled or on failure — returns raw)
+            let final: String
+            if raw.isEmpty {
+                final = raw
+            } else {
+                final = TranscriptionPolish.polish(raw)
+                if final != raw {
+                    self.log("Polished: '\(final)'")
+                }
+            }
 
             DispatchQueue.main.async {
-                if !text.isEmpty {
-                    RecordingState.current = .done(text: text)
+                if !final.isEmpty {
+                    RecordingState.current = .done(text: final)
                     self.playSound("Pop") // done sound
-                    TextInjector.inject(text)
-                    self.log("Injected: \(text)")
+                    TextInjector.inject(final)
+                    self.log("Injected: \(final)")
 
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                         RecordingState.current = .idle
@@ -236,12 +248,41 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        let polishCfg = TranscriptionPolish.Config.load()
+        let polishStatus = polishCfg.enabled ? "Polish: \(polishCfg.model)" : "Polish: off"
+        let polishItem = NSMenuItem(title: polishStatus, action: nil, keyEquivalent: "")
+        polishItem.isEnabled = false
+        menu.addItem(polishItem)
+
+        let openConfigItem = NSMenuItem(title: "Open Polish Config...", action: #selector(openPolishConfig), keyEquivalent: ",")
+        openConfigItem.target = self
+        menu.addItem(openConfigItem)
+
+        let openDictItem = NSMenuItem(title: "Open Dictionary...", action: #selector(openPolishDictionary), keyEquivalent: "")
+        openDictItem.target = self
+        menu.addItem(openDictItem)
+
+        menu.addItem(.separator())
+
         let quitItem = NSMenuItem(title: "Quit NotchyInput", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quitItem)
 
         self.statusItem.menu = menu
         self.statusItem.button?.performClick(nil)
         self.statusItem.menu = nil
+    }
+
+    // MARK: - Preferences
+
+    @objc private func openPolishConfig() {
+        // Ensure file exists, then open in default editor
+        _ = TranscriptionPolish.Config.load()
+        NSWorkspace.shared.open(URL(fileURLWithPath: TranscriptionPolish.Config.configPath))
+    }
+
+    @objc private func openPolishDictionary() {
+        _ = TranscriptionPolish.Config.load() // also seeds dictionary stub
+        NSWorkspace.shared.open(URL(fileURLWithPath: NSHomeDirectory() + "/.notchyinput/dictionary.json"))
     }
 
     // MARK: - Sound

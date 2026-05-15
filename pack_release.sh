@@ -9,7 +9,7 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="/tmp/notchyinput-release"
 APP_NAME="NotchyInput"
 DMG_NAME="NotchyInput-Mac"
-VERSION="1.0.0"
+VERSION="1.0.1"
 
 # Code signing identity (Developer ID Application: Yichen chu — Team HG5RRBKA8T)
 SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: Yichen chu (HG5RRBKA8T)}"
@@ -36,8 +36,8 @@ xcodebuild -project NotchyInput.xcodeproj \
     ONLY_ACTIVE_ARCH=NO \
     build 2>&1 | grep -E "BUILD|error:" || true
 
-# Find the built app
-DERIVED=$(xcodebuild -project NotchyInput.xcodeproj -scheme NotchyInput -showBuildSettings 2>/dev/null | grep "BUILT_PRODUCTS_DIR" | head -1 | awk '{print $3}')
+# Find the built app — must specify Release configuration to match the build above
+DERIVED=$(xcodebuild -project NotchyInput.xcodeproj -scheme NotchyInput -configuration Release -showBuildSettings 2>/dev/null | grep "BUILT_PRODUCTS_DIR" | head -1 | awk '{print $3}')
 BUILT_APP="$DERIVED/${APP_NAME}.app"
 
 if [ ! -d "$BUILT_APP" ]; then

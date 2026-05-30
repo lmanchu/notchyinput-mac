@@ -9,7 +9,7 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="/tmp/notchyinput-release"
 APP_NAME="NotchyInput"
 DMG_NAME="NotchyInput-Mac"
-VERSION="1.0.1"
+VERSION="1.0.2"
 
 # Code signing identity (Developer ID Application: Yichen chu — Team HG5RRBKA8T)
 SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: Yichen chu (HG5RRBKA8T)}"
@@ -49,59 +49,49 @@ cp -R "$BUILT_APP" "$BUILD_DIR/${APP_NAME}.app"
 APP="$BUILD_DIR/${APP_NAME}.app"
 echo "  App copied to $APP"
 
-# --- Step 2: Embed Python framework ---
-echo "[2/6] Embedding Python framework..."
+# --- Step 2: Embed portable Python (python-build-standalone) ---
+# Why PBS: Homebrew python3.12 is a 3-layer stub launcher tied to the brew
+# framework subtree. Copying just the stub leaves posix_spawn target missing
+# (Resources/Python.app/Contents/MacOS/Python) → ASR restart loop. PBS ships
+# a self-contained, @rpath-linked tarball — no framework, no stub chain.
+echo "[2/6] Downloading python-build-standalone (portable Python)..."
 
-# Find homebrew python3.12
-PY_PREFIX=$(/opt/homebrew/bin/python3.12 -c "import sys; print(sys.prefix)")
-PY_FRAMEWORK="/opt/homebrew/Cellar/python@3.12/$(ls /opt/homebrew/Cellar/python@3.12/)/Frameworks/Python.framework"
+PBS_RELEASE="20260510"
+PBS_PY_VERSION="3.12.13"
+PY_VER="3.12"
+PBS_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE}/cpython-${PBS_PY_VERSION}%2B${PBS_RELEASE}-aarch64-apple-darwin-install_only_stripped.tar.gz"
+PBS_CACHE="/tmp/notchyinput-pbs-${PBS_RELEASE}-${PBS_PY_VERSION}.tar.gz"
 
-if [ ! -d "$PY_FRAMEWORK" ]; then
-    echo "ERROR: Python.framework not found. Install: brew install python@3.12"
-    exit 1
+if [ ! -f "$PBS_CACHE" ]; then
+    echo "  Fetching $PBS_URL"
+    curl -fsSL -o "$PBS_CACHE" "$PBS_URL"
+else
+    echo "  Using cached tarball: $PBS_CACHE"
 fi
 
 EMBED_DIR="$APP/Contents/Resources/python"
-mkdir -p "$EMBED_DIR"
+rm -rf "$EMBED_DIR"
+mkdir -p "$APP/Contents/Resources"
 
-# Copy Python.framework (but skip heavy stuff we don't need)
-echo "  Copying Python.framework..."
-PY_VER="3.12"
-PY_SRC="$PY_FRAMEWORK/Versions/$PY_VER"
+# Tarball extracts a top-level `python/` dir; land it directly as EMBED_DIR
+tar xzf "$PBS_CACHE" -C "$APP/Contents/Resources"
+# (extracted as Resources/python/ — already at $EMBED_DIR)
 
-mkdir -p "$EMBED_DIR/bin"
-mkdir -p "$EMBED_DIR/lib/python${PY_VER}"
+# Sanity check: real binary, not a stub
+if [ ! -x "$EMBED_DIR/bin/python3" ] || [ "$($EMBED_DIR/bin/python3 -c 'print(1)' 2>/dev/null)" != "1" ]; then
+    echo "ERROR: embedded python failed to run"
+    exit 1
+fi
 
-# Copy python binary
-cp "$PY_SRC/bin/python${PY_VER}" "$EMBED_DIR/bin/python3"
-
-# Copy libpython
-cp "$PY_SRC/lib/libpython${PY_VER}.dylib" "$EMBED_DIR/lib/" 2>/dev/null || \
-    cp "$PY_FRAMEWORK/Versions/${PY_VER}/Python" "$EMBED_DIR/lib/libpython${PY_VER}.dylib" 2>/dev/null || true
-
-# Copy Python stdlib
-echo "  Copying stdlib..."
-cp -R "$PY_SRC/lib/python${PY_VER}/" "$EMBED_DIR/lib/python${PY_VER}/"
-
-# Remove heavy/unnecessary stdlib modules
-for d in test tests idlelib tkinter ensurepip distutils lib2to3 turtledemo; do
+echo "  Stripping stdlib bloat..."
+for d in test tests idlelib tkinter ensurepip lib2to3 turtledemo; do
     rm -rf "$EMBED_DIR/lib/python${PY_VER}/$d" 2>/dev/null
 done
 find "$EMBED_DIR" -name "*.pyc" -delete 2>/dev/null || true
 find "$EMBED_DIR" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
-
-# Remove broken symlinks (site-packages is a symlink in Homebrew Python)
-find "$EMBED_DIR" -type l ! -exec test -e {} \; -delete 2>/dev/null || true
-# Clear extended attributes
 xattr -cr "$EMBED_DIR" 2>/dev/null || true
 
-# Fix python binary to find its own libpython
-install_name_tool -change \
-    "/opt/homebrew/Cellar/python@3.12/$(ls /opt/homebrew/Cellar/python@3.12/)/Frameworks/Python.framework/Versions/${PY_VER}/Python" \
-    "@executable_path/../lib/libpython${PY_VER}.dylib" \
-    "$EMBED_DIR/bin/python3" 2>/dev/null || true
-
-echo "  Python framework embedded."
+echo "  Python embedded: $(du -sh "$EMBED_DIR" | awk '{print $1}')"
 
 # --- Step 3: Install site-packages ---
 echo "[3/6] Installing Python packages..."
@@ -113,8 +103,12 @@ xattr -cr "$EMBED_DIR" 2>/dev/null || true
 
 mkdir -p "$SITE_PKG"
 
-# Use pip to install into embedded location
-/opt/homebrew/bin/python3.12 -m pip install \
+# Bootstrap pip into embedded Python first (PBS ships without pip by default in stripped builds)
+"$EMBED_DIR/bin/python3" -m ensurepip --upgrade 2>/dev/null || \
+    curl -fsSL https://bootstrap.pypa.io/get-pip.py | "$EMBED_DIR/bin/python3" - --no-cache-dir
+
+# Install via embedded python so native .so install_names resolve against the bundle
+"$EMBED_DIR/bin/python3" -m pip install \
     --target "$SITE_PKG" \
     --no-cache-dir \
     mlx mlx-metal mlx_qwen3_asr numpy zhconv 2>&1 | tail -5

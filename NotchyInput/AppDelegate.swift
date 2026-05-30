@@ -231,7 +231,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func showContextMenu() {
         let menu = NSMenu()
 
-        let statusText = asrReady ? "Qwen3-ASR Ready" : "Loading model..."
+        let modelLabel = ASRModelRegistry.options.first { $0.id == ASRModelRegistry.currentID }?.label ?? "Qwen3-ASR"
+        let statusText = asrReady ? "\(modelLabel) Ready" : "Loading \(modelLabel)..."
         let statusItem = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
         statusItem.isEnabled = false
         menu.addItem(statusItem)
@@ -264,6 +265,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        // ASR model picker — switching writes UserDefaults and restarts the engine.
+        let modelMenuItem = NSMenuItem(title: "ASR Model", action: nil, keyEquivalent: "")
+        let modelSubmenu = NSMenu()
+        let currentModelID = ASRModelRegistry.currentID
+        for opt in ASRModelRegistry.options {
+            let item = NSMenuItem(title: "\(opt.label)  —  \(opt.note)",
+                                  action: #selector(selectASRModel(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = opt.id
+            item.state = (opt.id == currentModelID) ? .on : .off
+            modelSubmenu.addItem(item)
+        }
+        modelMenuItem.submenu = modelSubmenu
+        menu.addItem(modelMenuItem)
+
+        menu.addItem(.separator())
+
+        let restartASRItem = NSMenuItem(title: "Restart ASR Engine", action: #selector(restartASR), keyEquivalent: "r")
+        restartASRItem.target = self
+        menu.addItem(restartASRItem)
+
+        let restartAppItem = NSMenuItem(title: "Restart NotchyInput", action: #selector(restartApp), keyEquivalent: "R")
+        restartAppItem.target = self
+        menu.addItem(restartAppItem)
+
+        menu.addItem(.separator())
+
         let quitItem = NSMenuItem(title: "Quit NotchyInput", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quitItem)
 
@@ -283,6 +311,55 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openPolishDictionary() {
         _ = TranscriptionPolish.Config.load() // also seeds dictionary stub
         NSWorkspace.shared.open(URL(fileURLWithPath: NSHomeDirectory() + "/.notchyinput/dictionary.json"))
+    }
+
+    // MARK: - Model selection
+
+    @objc private func selectASRModel(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        if id == ASRModelRegistry.currentID {
+            NSLog("[app] ASR model unchanged: %@", id)
+            return
+        }
+        ASRModelRegistry.setCurrentID(id)
+        NSLog("[app] ASR model switched to %@ — restarting engine", id)
+        log("ASR model -> \(id)")
+        restartASR()
+    }
+
+    // MARK: - Restart actions
+
+    @objc private func restartASR() {
+        NSLog("[app] manual ASR restart triggered from menu")
+        log("manual restart ASR")
+        asrReady = false
+        DispatchQueue.main.async { [weak self] in
+            self?.statusItem.button?.image = NSImage(systemSymbolName: "mic.slash.fill", accessibilityDescription: "NotchyInput - Restarting")
+        }
+        asrBridge?.stop()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.asrBridge?.start()
+        }
+    }
+
+    @objc private func restartApp() {
+        NSLog("[app] manual app restart triggered from menu")
+        log("manual restart app")
+        let bundlePath = Bundle.main.bundlePath
+        let task = Process()
+        task.launchPath = "/usr/bin/open"
+        task.arguments = ["-n", bundlePath]
+        do {
+            try task.run()
+        } catch {
+            NSLog("[app] failed to relaunch: \(error)")
+            return
+        }
+        // Give /usr/bin/open a moment to fork the new instance before we exit,
+        // otherwise the parent's death can race the child's launch.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            NSApp.terminate(nil)
+        }
     }
 
     // MARK: - Sound

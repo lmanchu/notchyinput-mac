@@ -22,9 +22,33 @@ def send(obj):
     print(json.dumps(obj, ensure_ascii=False), flush=True)
 
 
+DEFAULT_MODEL_ID = "Qwen/Qwen3-ASR-0.6B"
+
+
+def _estimate_download_bytes(model_id: str) -> int:
+    """Rough download size for progress reporting. 1.7B is ~3x the 0.6B;
+    4/5/6/8-bit quantized variants are smaller. Only affects the progress
+    bar estimate, never correctness."""
+    mid = model_id.lower()
+    base = 3_400_000_000 if "1.7b" in mid else 1_200_000_000
+    if "4bit" in mid:
+        return int(base * 0.35)
+    if "5bit" in mid:
+        return int(base * 0.45)
+    if "6bit" in mid:
+        return int(base * 0.55)
+    if "8bit" in mid:
+        return int(base * 0.7)
+    return base
+
+
 def load_model():
-    """Load Qwen3-ASR model with download progress reporting."""
-    model_id = "Qwen/Qwen3-ASR-0.6B"
+    """Load Qwen3-ASR model with download progress reporting.
+
+    Model is selected via the NOTCHY_ASR_MODEL env var (set by the Swift app's
+    ASR Model menu); falls back to the 0.6B default when unset."""
+    model_id = os.environ.get("NOTCHY_ASR_MODEL", "").strip() or DEFAULT_MODEL_ID
+    short = model_id.split("/")[-1]
 
     # Check if model is already cached
     from huggingface_hub import snapshot_download, HfApi
@@ -35,13 +59,14 @@ def load_model():
         from huggingface_hub import try_to_load_from_cache
         cached = try_to_load_from_cache(model_id, "config.json")
         if cached is not None:
-            send({"status": "loading", "message": "Loading model from cache...", "progress": 0.5})
+            send({"status": "loading", "message": f"Loading {short} from cache...", "progress": 0.5})
         else:
-            send({"status": "loading", "message": "Downloading Qwen3-ASR model (~1.2GB)...", "progress": 0.0})
+            mb = _estimate_download_bytes(model_id) / 1_000_000
+            send({"status": "loading", "message": f"Downloading {short} (~{mb:.0f}MB)...", "progress": 0.0})
             # Download with progress callback
             _download_with_progress(model_id)
     except Exception:
-        send({"status": "loading", "message": "Loading model...", "progress": 0.0})
+        send({"status": "loading", "message": f"Loading {short}...", "progress": 0.0})
 
     send({"status": "loading", "message": "Initializing ASR engine...", "progress": 0.9})
 
@@ -56,7 +81,7 @@ def _download_with_progress(model_id):
     import threading
 
     # Track progress by monitoring cache directory size
-    total_size_estimate = 1_200_000_000  # ~1.2GB estimate
+    total_size_estimate = _estimate_download_bytes(model_id)
     cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
     model_cache = os.path.join(cache_dir, f"models--{model_id.replace('/', '--')}")
 

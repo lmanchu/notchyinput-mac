@@ -1,5 +1,44 @@
 import Foundation
 
+/// A selectable ASR model. `id` is the Hugging Face repo passed to the Python
+/// sidecar via the NOTCHY_ASR_MODEL env var.
+struct ASRModelOption {
+    let id: String
+    let label: String
+    let note: String
+}
+
+/// Single source of truth for the ASR model list and the user's choice.
+/// Only models verified to load with mlx_qwen3_asr 0.3.2 are listed —
+/// mlx-community quantized variants (4/5/6/8-bit) fail with "Missing parameters"
+/// because their quant format differs from what load_models expects, so they
+/// are deliberately excluded.
+enum ASRModelRegistry {
+    static let userDefaultsKey = "asrModelID"
+
+    static let options: [ASRModelOption] = [
+        ASRModelOption(id: "Qwen/Qwen3-ASR-0.6B",
+                       label: "Qwen3-ASR-0.6B",
+                       note: "fast · ~1.8 GB RAM"),
+        ASRModelOption(id: "Qwen/Qwen3-ASR-1.7B",
+                       label: "Qwen3-ASR-1.7B",
+                       note: "accurate · ~4.9 GB RAM · 3.4 GB first download"),
+    ]
+
+    /// Currently selected model id (falls back to the first/default option).
+    static var currentID: String {
+        let stored = UserDefaults.standard.string(forKey: userDefaultsKey)
+        if let stored, options.contains(where: { $0.id == stored }) {
+            return stored
+        }
+        return options[0].id
+    }
+
+    static func setCurrentID(_ id: String) {
+        UserDefaults.standard.set(id, forKey: userDefaultsKey)
+    }
+}
+
 /// Bridges Swift to the Python Qwen3-ASR server via a long-running subprocess.
 /// Protocol: JSON lines over stdin/stdout.
 /// Swift → Python: {"audio": "<base64 WAV>", "language": "zh"}
@@ -153,6 +192,10 @@ final class ASRBridge {
         if FileManager.default.fileExists(atPath: embeddedHome + "/lib/python3.12") {
             env["PYTHONHOME"] = embeddedHome
         }
+
+        // Tell the Python sidecar which Qwen3-ASR model to load.
+        env["NOTCHY_ASR_MODEL"] = ASRModelRegistry.currentID
+        NSLog("[asr] Using model: %@", ASRModelRegistry.currentID)
 
         proc.environment = env
 

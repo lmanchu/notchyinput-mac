@@ -9,7 +9,7 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="/tmp/notchyinput-release"
 APP_NAME="NotchyInput"
 DMG_NAME="NotchyInput-Mac"
-VERSION="1.0.2"
+VERSION="1.0.3"
 
 # Code signing identity (Developer ID Application: Yichen chu — Team HG5RRBKA8T)
 SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: Yichen chu (HG5RRBKA8T)}"

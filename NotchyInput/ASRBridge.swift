@@ -1,5 +1,50 @@
 import Foundation
 
+extension ISO8601DateFormatter {
+    static let diag = ISO8601DateFormatter()
+}
+
+/// Append-only diagnostic black box. Writes to ~/.notchyinput/diagnostics.log
+/// in ALL build configs (unlike the `#if DEBUG` NSLog paths), so a random
+/// failure leaves a forensic trail we can read after the fact instead of
+/// forcing a blind restart. Self-rotates at 2 MB.
+enum DiagnosticsLog {
+    private static let queue = DispatchQueue(label: "notchy.diag")
+    private static let maxBytes = 2_000_000
+
+    private static var dir: String { NSHomeDirectory() + "/.notchyinput" }
+    private static var path: String { dir + "/diagnostics.log" }
+
+    /// `fields` uses KeyValuePairs so the log column order is stable/readable.
+    static func log(_ category: String, _ event: String, _ fields: KeyValuePairs<String, Any> = [:]) {
+        let ts = ISO8601DateFormatter.diag.string(from: Date())
+        var line = "\(ts) \(category) \(event)"
+        for (k, v) in fields { line += " \(k)=\(v)" }
+        line += "\n"
+        queue.async {
+            let fm = FileManager.default
+            if !fm.fileExists(atPath: dir) {
+                try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            }
+            rotateIfNeeded(fm)
+            guard let data = line.data(using: .utf8) else { return }
+            if let fh = FileHandle(forWritingAtPath: path) {
+                fh.seekToEndOfFile(); fh.write(data); fh.closeFile()
+            } else {
+                fm.createFile(atPath: path, contents: data)
+            }
+        }
+    }
+
+    private static func rotateIfNeeded(_ fm: FileManager) {
+        guard let attrs = try? fm.attributesOfItem(atPath: path),
+              let size = attrs[.size] as? Int, size > maxBytes else { return }
+        let rotated = path + ".1"
+        try? fm.removeItem(atPath: rotated)
+        try? fm.moveItem(atPath: path, toPath: rotated)
+    }
+}
+
 /// A selectable ASR model. `id` is the Hugging Face repo passed to the Python
 /// sidecar via the NOTCHY_ASR_MODEL env var.
 struct ASRModelOption {
@@ -53,8 +98,22 @@ final class ASRBridge {
     private var isRestarting = false
     private var healthTimer: Timer?
 
-    /// Minimum RSS (MB) for a healthy model — Qwen3-ASR-0.6B needs ~1.2 GB.
+    // Black-box forensics: timestamps so a snapshot can record how long ago the
+    // model was last healthy / last produced a real transcription.
+    private var spawnAt: Date?
+    private var lastReadyAt: Date?
+    private var lastTxnOkAt: Date?
+    private var readyWatchdog: Timer?
+
+    /// Minimum LIVE RSS (MB) for a healthy model. A warmed Qwen3-ASR-0.6B holds
+    /// ~1.9 GB resident; a paged-out zombie drops to <100 MB. (The sidecar now
+    /// reports current RSS, not ru_maxrss peak, so this threshold is meaningful.)
     private let minHealthyRSSMB: Double = 500
+
+    /// If the sidecar hasn't signaled ready within this many seconds of spawn,
+    /// treat it as a stuck load and restart — closes the pre-ready blind spot
+    /// where the health timer (which only starts after ready) never runs.
+    private let readyTimeoutSec: TimeInterval = 90
 
     init(onReady: @escaping () -> Void) {
         self.readyCallback = onReady
@@ -80,6 +139,44 @@ final class ASRBridge {
         DispatchQueue.main.async { [weak self] in
             self?.healthTimer?.invalidate()
             self?.healthTimer = nil
+        }
+    }
+
+    // MARK: – Black-box snapshot & ready watchdog
+
+    /// Dump the full failure context to the diagnostics log BEFORE we restart,
+    /// so an auto-recovered failure still leaves forensic evidence.
+    private func diagSnapshot(_ trigger: String, rss: Double = -1) {
+        let now = Date()
+        DiagnosticsLog.log("asr", "snapshot", [
+            "trigger": trigger,
+            "pid": process?.processIdentifier ?? -1,
+            "rss_mb": rss,
+            "running": process?.isRunning ?? false,
+            "isReady": isReady,
+            "sinceReady_s": lastReadyAt.map { Int(now.timeIntervalSince($0)) } ?? -1,
+            "sinceTxnOk_s": lastTxnOkAt.map { Int(now.timeIntervalSince($0)) } ?? -1,
+            "uptime_s": spawnAt.map { Int(now.timeIntervalSince($0)) } ?? -1
+        ])
+    }
+
+    private func startReadyWatchdog() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.readyWatchdog?.invalidate()
+            self.readyWatchdog = Timer.scheduledTimer(withTimeInterval: self.readyTimeoutSec, repeats: false) { [weak self] _ in
+                guard let self = self, !self.isReady else { return }
+                NSLog("[asr] ready-timeout — sidecar never signaled ready, restarting")
+                self.diagSnapshot("ready-timeout")
+                self.process?.terminate()  // terminationHandler → scheduleRestart
+            }
+        }
+    }
+
+    private func stopReadyWatchdog() {
+        DispatchQueue.main.async { [weak self] in
+            self?.readyWatchdog?.invalidate()
+            self?.readyWatchdog = nil
         }
     }
 
@@ -121,14 +218,17 @@ final class ASRBridge {
 
         if timedOut {
             NSLog("[asr] health-ping timeout — model unresponsive, restarting")
+            diagSnapshot("health-ping-timeout")
             process?.terminate()
             return
         }
         if rssMB < minHealthyRSSMB {
             NSLog("[asr] health-ping RSS %.0f MB < %.0f MB threshold — model dropped, restarting", rssMB, minHealthyRSSMB)
+            diagSnapshot("health-rss-low", rss: rssMB)
             process?.terminate()
             return
         }
+        DiagnosticsLog.log("asr", "health", ["rss_mb": rssMB, "pong": true])
         NSLog("[asr] health-ping OK — RSS %.0f MB", rssMB)
     }
 
@@ -208,7 +308,10 @@ final class ASRBridge {
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if !data.isEmpty, let msg = String(data: data, encoding: .utf8) {
-                print("[asr-stderr] \(msg)", terminator: "")
+                // Land the sidecar's stderr (load failures, tracebacks) in the
+                // black box — Release builds have no console, so this was lost.
+                let trimmed = msg.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { DiagnosticsLog.log("asr-stderr", trimmed) }
             }
         }
 
@@ -228,7 +331,12 @@ final class ASRBridge {
                 if let status = dict["status"] as? String {
                     if status == "ready" {
                         self?.isReady = true
+                        self?.lastReadyAt = Date()
                         NSLog("[asr] Python ASR server ready")
+                        DiagnosticsLog.log("asr", "ready", [
+                            "uptime_s": self?.spawnAt.map { Int(Date().timeIntervalSince($0)) } ?? -1
+                        ])
+                        self?.stopReadyWatchdog()
                         self?.startHealthTimer()
                         DispatchQueue.main.async {
                             RecordingState.current = .idle
@@ -251,6 +359,11 @@ final class ASRBridge {
         proc.terminationHandler = { [weak self] p in
             NSLog("[asr] Python subprocess died: pid=%d status=%d reason=%d",
                   p.processIdentifier, p.terminationStatus, p.terminationReason.rawValue)
+            DiagnosticsLog.log("asr", "died", [
+                "pid": p.processIdentifier,
+                "status": p.terminationStatus,
+                "reason": p.terminationReason.rawValue
+            ])
             guard let self = self else { return }
             self.isReady = false
             self.scheduleRestart(reason: "subprocess exit")
@@ -258,9 +371,16 @@ final class ASRBridge {
 
         do {
             try proc.run()
+            spawnAt = Date()
             print("[asr] Started Python ASR server (pid: \(proc.processIdentifier))")
+            DiagnosticsLog.log("asr", "spawn", [
+                "pid": proc.processIdentifier,
+                "model": ASRModelRegistry.currentID
+            ])
+            startReadyWatchdog()
         } catch {
             print("[asr] Failed to start Python process: \(error)")
+            DiagnosticsLog.log("asr", "spawn-failed", ["error": String(describing: error)])
         }
     }
 
@@ -271,7 +391,9 @@ final class ASRBridge {
             if self.isRestarting { return }
             self.isRestarting = true
             NSLog("[asr] Scheduling restart (reason: %@)", reason)
+            DiagnosticsLog.log("asr", "restart", ["reason": reason])
             self.stopHealthTimer()
+            self.stopReadyWatchdog()
             self.isReady = false
             self.process = nil
             self.stdinPipe = nil
@@ -285,6 +407,7 @@ final class ASRBridge {
 
     func stop() {
         stopHealthTimer()
+        stopReadyWatchdog()
         // Clear terminationHandler first — otherwise when the subprocess actually
         // exits (possibly minutes later, e.g. after macOS sleep delivers the queued
         // signal), the handler fires scheduleRestart() and spawns an extra sidecar
@@ -371,6 +494,7 @@ final class ASRBridge {
 
         let timeoutResult = semaphore.wait(timeout: .now() + 30)
         if timeoutResult == .timedOut {
+            DiagnosticsLog.log("txn", "timeout", ["running": process?.isRunning ?? false])
             NSLog("[asr] Transcribe timed out after 30s — checking subprocess health")
             if !(process?.isRunning ?? false) {
                 scheduleRestart(reason: "timeout with dead subprocess")
@@ -384,8 +508,11 @@ final class ASRBridge {
         }
         if let err = errorResponse {
             NSLog("[asr] Returning empty result due to error: %@", err)
+            DiagnosticsLog.log("txn", "error", ["msg": err])
             return ""
         }
+        if !result.isEmpty { lastTxnOkAt = Date() }
+        DiagnosticsLog.log("txn", result.isEmpty ? "empty" : "ok")
         return result
     }
 }

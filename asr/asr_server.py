@@ -42,6 +42,41 @@ def _estimate_download_bytes(model_id: str) -> int:
     return base
 
 
+def _current_rss_mb() -> float:
+    """Current resident set size in MB.
+
+    NOT ru_maxrss — that is the PEAK RSS and never decreases, so once the model
+    loads (~2 GB peak) it stays ~2 GB forever even after macOS pages the model
+    out on idle. The Swift health watchdog was fooled by this: it saw the stale
+    2 GB peak, judged the zombie "healthy", and never restarted it. Shell out to
+    ps for the live RSS; fall back to ru_maxrss only if ps fails."""
+    import subprocess
+    try:
+        out = subprocess.run(["/bin/ps", "-o", "rss=", "-p", str(os.getpid())],
+                             capture_output=True, text=True, timeout=2)
+        return round(int(out.stdout.strip()) / 1024, 1)  # KB -> MB
+    except Exception:
+        import resource
+        return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1_000_000, 1)
+
+
+def _warmup(model):
+    """Run one silent inference so lazy MLX weights materialize immediately.
+
+    Without this, an idle-but-healthy model sits at ~188 MB (weights not yet
+    evaluated) — indistinguishable by RSS from a ~69 MB paged-out zombie, so a
+    current-RSS watchdog would either miss zombies or kill healthy idles. After
+    warmup a healthy model holds ~2 GB resident, making the 500 MB threshold
+    meaningful. Bonus: removes first-use latency."""
+    try:
+        import mlx_qwen3_asr
+        silent = np.zeros(16000, dtype=np.float32)  # 1s @ 16 kHz
+        mlx_qwen3_asr.transcribe(silent, model=model, language="zh")
+    except Exception as e:
+        sys.stderr.write(f"[asr_server] warmup failed (non-fatal): {e}\n")
+        sys.stderr.flush()
+
+
 def load_model():
     """Load Qwen3-ASR model with download progress reporting.
 
@@ -150,6 +185,10 @@ def main():
         send({"status": "fatal", "error": f"load_model failed: {e}"})
         sys.exit(2)
 
+    # Warm up so idle RSS reflects the real resident model (see _warmup),
+    # making the Swift RSS watchdog able to tell a warm model from a zombie.
+    _warmup(model)
+
     # Signal ready
     send({"status": "ready"})
 
@@ -165,11 +204,10 @@ def main():
             send({"error": f"Invalid JSON: {e}"})
             continue
 
-        # Health probe — lets Swift confirm model is still responsive.
+        # Health probe — lets Swift confirm model is still resident.
+        # Report LIVE RSS (not peak) so the watchdog can detect a paged-out model.
         if request.get("ping"):
-            import resource
-            rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1_000_000
-            send({"pong": True, "rss_mb": round(rss_mb, 1)})
+            send({"pong": True, "rss_mb": _current_rss_mb()})
             continue
 
         audio_b64 = request.get("audio", "")

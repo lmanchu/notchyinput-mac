@@ -105,11 +105,6 @@ final class ASRBridge {
     private var lastTxnOkAt: Date?
     private var readyWatchdog: Timer?
 
-    /// Minimum LIVE RSS (MB) for a healthy model. A warmed Qwen3-ASR-0.6B holds
-    /// ~1.9 GB resident; a paged-out zombie drops to <100 MB. (The sidecar now
-    /// reports current RSS, not ru_maxrss peak, so this threshold is meaningful.)
-    private let minHealthyRSSMB: Double = 500
-
     /// If the sidecar hasn't signaled ready within this many seconds of spawn,
     /// treat it as a stuck load and restart — closes the pre-ready blind spot
     /// where the health timer (which only starts after ready) never runs.
@@ -189,6 +184,7 @@ final class ASRBridge {
 
         let semaphore = DispatchSemaphore(value: 0)
         var rssMB: Double = 0
+        var modelOk = false
 
         let prev = stdout.fileHandleForReading.readabilityHandler
         stdout.fileHandleForReading.readabilityHandler = { handle in
@@ -200,6 +196,7 @@ final class ASRBridge {
             else { return }
             if dict["pong"] as? Bool == true {
                 rssMB = dict["rss_mb"] as? Double ?? 0
+                modelOk = dict["model_ok"] as? Bool ?? false
                 semaphore.signal()
             }
         }
@@ -213,23 +210,28 @@ final class ASRBridge {
             return
         }
 
-        let timedOut = semaphore.wait(timeout: .now() + 5) == .timedOut
+        // The probe runs a real (tiny) inference, so allow longer than a bare
+        // ping — a paged-out model may take a few seconds to fault back in.
+        let timedOut = semaphore.wait(timeout: .now() + 10) == .timedOut
         stdout.fileHandleForReading.readabilityHandler = prev
 
         if timedOut {
-            NSLog("[asr] health-ping timeout — model unresponsive, restarting")
-            diagSnapshot("health-ping-timeout")
+            NSLog("[asr] health probe timeout — model stuck, restarting")
+            diagSnapshot("health-probe-timeout", rss: rssMB)
             process?.terminate()
             return
         }
-        if rssMB < minHealthyRSSMB {
-            NSLog("[asr] health-ping RSS %.0f MB < %.0f MB threshold — model dropped, restarting", rssMB, minHealthyRSSMB)
-            diagSnapshot("health-rss-low", rss: rssMB)
+        // Health = the model could actually run inference. RSS is NOT used to
+        // decide life/death (MLX frees memory after inference; a healthy idle
+        // model sits at ~180 MB), only recorded for forensics.
+        if !modelOk {
+            NSLog("[asr] health probe: model_ok=false — inference failed, restarting")
+            diagSnapshot("health-probe-failed", rss: rssMB)
             process?.terminate()
             return
         }
-        DiagnosticsLog.log("asr", "health", ["rss_mb": rssMB, "pong": true])
-        NSLog("[asr] health-ping OK — RSS %.0f MB", rssMB)
+        DiagnosticsLog.log("asr", "health", ["rss_mb": rssMB, "model_ok": true])
+        NSLog("[asr] health probe OK — model_ok, RSS %.0f MB", rssMB)
     }
 
     func start() {

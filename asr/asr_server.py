@@ -61,13 +61,11 @@ def _current_rss_mb() -> float:
 
 
 def _warmup(model):
-    """Run one silent inference so lazy MLX weights materialize immediately.
+    """Run one silent inference at startup to remove first-use latency.
 
-    Without this, an idle-but-healthy model sits at ~188 MB (weights not yet
-    evaluated) — indistinguishable by RSS from a ~69 MB paged-out zombie, so a
-    current-RSS watchdog would either miss zombies or kill healthy idles. After
-    warmup a healthy model holds ~2 GB resident, making the 500 MB threshold
-    meaningful. Bonus: removes first-use latency."""
+    Note: this does NOT keep RSS high — MLX 0.3.x frees memory after each
+    inference, so the model drops back to ~180 MB when idle. RSS is therefore
+    not a health signal; the ping handler uses an inference probe instead."""
     try:
         import mlx_qwen3_asr
         silent = np.zeros(16000, dtype=np.float32)  # 1s @ 16 kHz
@@ -204,10 +202,23 @@ def main():
             send({"error": f"Invalid JSON: {e}"})
             continue
 
-        # Health probe — lets Swift confirm model is still resident.
-        # Report LIVE RSS (not peak) so the watchdog can detect a paged-out model.
+        # Health probe — the ONLY reliable signal is whether the model can
+        # actually run inference. RSS is useless here: MLX 0.3.x releases memory
+        # after each inference, so a healthy idle model sits at ~180 MB —
+        # indistinguishable from a dead one by RSS. So we run a tiny silent
+        # inference and report model_ok. RSS is still reported for the black box
+        # but the Swift watchdog must NOT restart based on it.
         if request.get("ping"):
-            send({"pong": True, "rss_mb": _current_rss_mb()})
+            try:
+                import mlx_qwen3_asr
+                probe = np.zeros(2000, dtype=np.float32)  # ~0.12 s silence
+                mlx_qwen3_asr.transcribe(probe, model=model, language="zh")
+                send({"pong": True, "model_ok": True, "rss_mb": _current_rss_mb()})
+            except Exception as e:
+                sys.stderr.write(f"[asr_server] health probe inference failed: {e}\n")
+                sys.stderr.flush()
+                send({"pong": True, "model_ok": False, "rss_mb": _current_rss_mb(),
+                      "err": str(e)[:200]})
             continue
 
         audio_b64 = request.get("audio", "")
